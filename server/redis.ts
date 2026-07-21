@@ -143,6 +143,7 @@ export interface PresenceEntry {
   userId: string;
   name: string;
   color: string;
+  cursor: { anchor: number; head: number } | null;
   lastSeen: number;
 }
 

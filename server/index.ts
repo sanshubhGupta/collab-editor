@@ -10,8 +10,31 @@ import {
   loadDocFromRedis,
   setPresence,
   getPresence,
+  removePresence,
 } from "./redis";
 import { loadAndApplyDocument, saveDocumentContent } from "./db-persist";
+
+interface PresenceData {
+  userId: string;
+  name: string;
+  color: string;
+  cursor: CursorPosition | null;
+  lastSeen: number;
+}
+
+// docId -> (userId -> PresenceData). In-memory for fast local broadcasts;
+// mirrored into Redis (via setPresence/getPresence) as the cross-instance
+// source of truth with a TTL safety net.
+const presenceRooms = new Map<string, Map<string, PresenceData>>();
+
+function getPresenceRoom(docId: string): Map<string, PresenceData> {
+  let room = presenceRooms.get(docId);
+  if (!room) {
+    room = new Map<string, PresenceData>();
+    presenceRooms.set(docId, room);
+  }
+  return room;
+}
 
 interface RoomState {
   ydoc: Y.Doc;
@@ -85,7 +108,12 @@ io.on("connection", (socket: Socket) => {
 
   socket.on(
     "join-document",
-    async (payload: { docId: string; userId: string; name: string; color: string }) => {
+    async (payload: {
+      docId: string;
+      userId: string;
+      name: string;
+      color: string;
+    }) => {
       const { docId, userId, name, color } = payload;
       try {
         const room = await getOrCreateRoom(docId);
@@ -97,7 +125,16 @@ io.on("connection", (socket: Socket) => {
 
         socket.emit("sync-state", Y.encodeStateAsUpdate(room.ydoc));
 
-        await setPresence(docId, userId, { userId, name, color, lastSeen: Date.now() });
+        const presenceData: PresenceData = {
+          userId,
+          name,
+          color,
+          cursor: null,
+          lastSeen: Date.now(),
+        };
+        getPresenceRoom(docId).set(userId, presenceData);
+        await setPresence(docId, userId, presenceData);
+
         socket.to(docId).emit("user-joined", { userId, name, color });
 
         const presence = await getPresence(docId);
@@ -106,34 +143,56 @@ io.on("connection", (socket: Socket) => {
         console.error(`[join-document] error for doc ${docId}:`, err);
         socket.emit("error", { message: "Failed to join document" });
       }
-    }
+    },
   );
 
-  socket.on("yjs-update", async (payload: { docId: string; update: Uint8Array }) => {
-    const { docId, update } = payload;
-    const room = rooms.get(docId);
-    if (!room) return;
+  socket.on(
+    "yjs-update",
+    async (payload: { docId: string; update: Uint8Array }) => {
+      const { docId, update } = payload;
+      const room = rooms.get(docId);
+      if (!room) return;
 
-    try {
-      Y.applyUpdate(room.ydoc, update);
-      room.dirty = true;
+      try {
+        Y.applyUpdate(room.ydoc, update);
+        room.dirty = true;
 
-      socket.to(docId).emit("yjs-update", update);
-      await publishYjsUpdate(docId, update, SERVER_ID);
-    } catch (err) {
-      console.error(`[yjs-update] error for doc ${docId}:`, err);
-    }
-  });
+        socket.to(docId).emit("yjs-update", update);
+        await publishYjsUpdate(docId, update, SERVER_ID);
+      } catch (err) {
+        console.error(`[yjs-update] error for doc ${docId}:`, err);
+      }
+    },
+  );
 
   socket.on(
     "cursor-update",
-    (payload: { docId: string; userId: string; cursor: CursorPosition }) => {
-      socket.to(payload.docId).emit("cursor-moved", {
-        userId: payload.userId,
-        cursor: payload.cursor,
-      });
+    async (payload: { docId: string; userId: string; cursor: CursorPosition }) => {
+        const { docId, userId, cursor } = payload;
+        const presenceRoom = presenceRooms.get(docId);
+        const existing = presenceRoom?.get(userId);
+        if (!presenceRoom || !existing) return;
+
+        const updated: PresenceData = { ...existing, cursor, lastSeen: Date.now() };
+        presenceRoom.set(userId, updated);
+
+        socket.to(docId).emit("cursor-moved", { userId, cursor });
+
+        // Refresh Redis mirror + TTL, but don't block the broadcast on it.
+        void setPresence(docId, userId, updated);
     }
-  );
+    );
+
+  socket.on("presence-heartbeat", async (payload: { docId: string; userId: string }) => {
+        const { docId, userId } = payload;
+        const presenceRoom = presenceRooms.get(docId);
+        const existing = presenceRoom?.get(userId);
+        if (!presenceRoom || !existing) return;
+
+        const updated: PresenceData = { ...existing, lastSeen: Date.now() };
+        presenceRoom.set(userId, updated);
+        await setPresence(docId, userId, updated);
+  });
 
   async function handleLeave(): Promise<void> {
     if (!currentDocId || !currentUserId) return;
@@ -141,14 +200,22 @@ io.on("connection", (socket: Socket) => {
     const docId = currentDocId;
     const userId = currentUserId;
     const room = rooms.get(docId);
-    if (!room) return;
 
-    room.clients.delete(socket.id);
+    const presenceRoom = presenceRooms.get(docId);
+    presenceRoom?.delete(userId);
+    await removePresence(docId, userId);
     socket.to(docId).emit("user-left", { userId });
 
+    if (presenceRoom && presenceRoom.size === 0) {
+        presenceRooms.delete(docId);
+    }
+
+    if (!room) return;
+    room.clients.delete(socket.id);
+
     if (room.clients.size === 0) {
-      await flushRoom(docId, room);
-      rooms.delete(docId);
+        await flushRoom(docId, room);
+        rooms.delete(docId);
     }
   }
 
@@ -172,7 +239,7 @@ async function shutdown(): Promise<void> {
   clearInterval(persistTimer);
 
   await Promise.all(
-    Array.from(rooms.entries()).map(([docId, room]) => flushRoom(docId, room))
+    Array.from(rooms.entries()).map(([docId, room]) => flushRoom(docId, room)),
   );
 
   io.close(() => {
