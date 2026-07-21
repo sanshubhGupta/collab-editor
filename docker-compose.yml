@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: collab_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: collab_db
+      POSTGRES_USER: collab_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collab_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collab_user -d collab_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    container_name: collab_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: collab_postgres_data
+  redis_data:
+    name: collab_redis_data
