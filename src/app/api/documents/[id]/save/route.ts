@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as Y from "yjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { checkDocumentAccess } from "@/lib/with-document-access";
 
 export async function POST(
   req: NextRequest,
@@ -27,31 +28,22 @@ export async function POST(
     return NextResponse.json({ error: "Missing 'update' field" }, { status: 400 });
   }
 
-  const document = await prisma.document.findUnique({
-    where: { id: documentId },
-    select: {
-      ownerId: true,
-      content: true,
-      members: {
-        where: { userId },
-        select: { role: true },
-      },
-    },
-  });
-
-  if (!document) {
-    return NextResponse.json({ error: "Document not found" }, { status: 404 });
-  }
-
-  const isOwner = document.ownerId === userId;
-  const memberRole = document.members[0]?.role;
-  const canEdit = isOwner || memberRole === "OWNER" || memberRole === "EDITOR";
-
-  if (!canEdit) {
+  const access = await checkDocumentAccess(documentId, userId);
+  if (!access.allowed) return access.response;
+  if (access.role !== "OWNER" && access.role !== "EDITOR") {
     return NextResponse.json(
       { error: "You do not have permission to edit this document" },
       { status: 403 }
     );
+  }
+
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { content: true },
+  });
+
+  if (!document) {
+    return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
 
   let incomingUpdate: Uint8Array;

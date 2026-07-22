@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Collaboration from "@tiptap/extension-collaboration";
-import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
+import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import Underline from "@tiptap/extension-underline";
 import Placeholder from "@tiptap/extension-placeholder";
 import * as Y from "yjs";
@@ -86,7 +86,7 @@ export default function CollaborativeEditor({
           placeholder: editable ? "Start writing..." : "This document is empty.",
         }),
         Collaboration.configure({ document: ydoc }),
-        CollaborationCursor.configure({
+        CollaborationCaret.configure({
           provider: { awareness: awarenessRef.current ?? new Awareness(ydoc) },
           user: { name: currentUser.name, color: currentUser.color },
         }),
@@ -125,12 +125,12 @@ export default function CollaborativeEditor({
     socket.io.on("reconnect_attempt", () => setStatus("reconnecting"));
     socket.io.on("reconnect", () => setStatus("connected"));
 
-    socket.on("sync-state", (update: Uint8Array) => {
-      Y.applyUpdate(ydoc, update, "remote");
+    socket.on("sync-state", (update: ArrayBuffer | Uint8Array) => {
+      Y.applyUpdate(ydoc, new Uint8Array(update), "remote");
     });
 
-    socket.on("yjs-update", (update: Uint8Array) => {
-      Y.applyUpdate(ydoc, update, "remote");
+    socket.on("yjs-update", (update: ArrayBuffer | Uint8Array) => {
+      Y.applyUpdate(ydoc, new Uint8Array(update), "remote");
     });
 
     socket.on("awareness-update", (update: number[]) => {
