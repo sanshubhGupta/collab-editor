@@ -194,6 +194,10 @@ io.on("connection", (socket: Socket) => {
         await setPresence(docId, userId, updated);
   });
 
+  socket.on("awareness-update", (payload: { docId: string; update: number[] }) => {
+    socket.to(payload.docId).emit("awareness-update", payload.update);
+  });
+
   async function handleLeave(): Promise<void> {
     if (!currentDocId || !currentUserId) return;
 

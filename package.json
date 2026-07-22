@@ -15,6 +15,8 @@
     "@prisma/client": "^7.8.0",
     "@tiptap/extension-collaboration": "^3.27.3",
     "@tiptap/extension-collaboration-cursor": "^3.0.0",
+    "@tiptap/extension-placeholder": "^3.27.3",
+    "@tiptap/extension-underline": "^3.27.3",
     "@tiptap/pm": "^3.27.3",
     "@tiptap/react": "^3.27.3",
     "@tiptap/starter-kit": "^3.27.3",
