@@ -179,7 +179,7 @@ export default function CollaborativeEditor({
     // remotely (origin === "remote") to avoid re-broadcasting an echo.
     const onDocUpdate = (update: Uint8Array, origin: unknown) => {
       if (origin === "remote") return;
-      socket.emit("yjs-update", { docId: documentId, update });
+      socket.emit("yjs-update", { docId: documentId, update, userId: currentUser.id });
     };
     ydoc.on("update", onDocUpdate);
 

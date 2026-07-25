@@ -13,6 +13,7 @@ interface ShareModalProps {
 
 type InviteRole = "EDITOR" | "VIEWER";
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export default function ShareModal({ documentId, currentUserId, onClose }: ShareModalProps) {
   const [members, setMembers] = useState<MemberListItem[]>([]);
   const [loading, setLoading] = useState(true);

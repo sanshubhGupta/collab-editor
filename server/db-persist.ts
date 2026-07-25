@@ -1,5 +1,6 @@
 // server/db-persist.ts
 import * as Y from "yjs";
+import { createHash } from "crypto";
 import { prisma } from "../src/lib/prisma";
 import { loadDocFromRedis, saveDocToRedis } from "./redis";
 
@@ -81,5 +82,57 @@ export async function loadAndApplyDocument(docId: string, ydoc: Y.Doc): Promise<
     console.error(`[db-persist] loadAndApplyDocument failed for doc ${docId}:`, err);
     // Don't throw — a fresh empty Y.Doc is a safe fallback so the user
     // can still open and start editing rather than being fully blocked.
+  }
+}
+
+/**
+ * Simple SHA-256 hash of a byte array, used to detect no-op version
+ * snapshots (identical content since the last saved version) without
+ * doing a full byte-by-byte comparison.
+ */
+export function hashBytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Look up a document's owner, used as a fallback "createdById" for
+ * auto-saved versions when no one has actually made an edit yet in the
+ * current room's lifetime (e.g. right after server restart).
+ */
+export async function getDocumentOwnerId(docId: string): Promise<string | null> {
+  try {
+    const doc = await prisma.document.findUnique({
+      where: { id: docId },
+      select: { ownerId: true },
+    });
+    return doc?.ownerId ?? null;
+  } catch (err) {
+    console.error(`[db-persist] getDocumentOwnerId failed for doc ${docId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Save a new DocumentVersion snapshot. Used by both automatic (every 2min
+ * of active editing) and manual ("Save version now") version creation.
+ */
+export async function saveVersionSnapshot(
+  documentId: string,
+  snapshot: Uint8Array,
+  createdById: string,
+  label?: string
+): Promise<void> {
+  try {
+    await prisma.documentVersion.create({
+      data: {
+        documentId,
+        snapshot: Buffer.from(snapshot),
+        createdById,
+        label: label ?? null,
+      },
+    });
+  } catch (err) {
+    console.error(`[db-persist] saveVersionSnapshot failed for doc ${documentId}:`, err);
+    throw err;
   }
 }

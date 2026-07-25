@@ -23,6 +23,8 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  documentVersions DocumentVersion[]
 }
 
 model Account {
@@ -77,6 +79,8 @@ model Document {
 
   owner   User             @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   members DocumentMember[]
+
+  documentVersions DocumentVersion[]
 }
 
 enum DocumentRole {
@@ -96,5 +100,19 @@ model DocumentMember {
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, userId])
+  @@index([documentId])
+}
+
+model DocumentVersion {
+  id          String   @id @default(cuid())
+  documentId  String
+  snapshot    Bytes
+  createdById String
+  label       String?
+  createdAt   DateTime @default(now())
+
+  document  Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy User     @relation(fields: [createdById], references: [id])
+
   @@index([documentId])
 }

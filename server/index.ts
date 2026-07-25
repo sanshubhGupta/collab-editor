@@ -12,7 +12,13 @@ import {
   getPresence,
   removePresence,
 } from "./redis";
-import { loadAndApplyDocument, saveDocumentContent } from "./db-persist";
+import {
+  loadAndApplyDocument,
+  saveDocumentContent,
+  hashBytes,
+  getDocumentOwnerId,
+  saveVersionSnapshot,
+} from "./db-persist";
 
 interface PresenceData {
   userId: string;
@@ -40,6 +46,10 @@ interface RoomState {
   ydoc: Y.Doc;
   clients: Set<string>;
   dirty: boolean;
+  ownerId: string;
+  lastEditorUserId: string | null;
+  lastVersionHash: string | null;
+  lastVersionAt: number;
 }
 
 interface CursorPosition {
@@ -50,6 +60,7 @@ interface CursorPosition {
 const SERVER_ID = uuidv4();
 const PORT = Number(process.env.SOCKET_PORT) || 3001;
 const PERSIST_INTERVAL_MS = 5000;
+const VERSION_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
 const rooms = new Map<string, RoomState>();
 
@@ -76,15 +87,29 @@ async function getOrCreateRoom(docId: string): Promise<RoomState> {
     await loadAndApplyDocument(docId, ydoc);
   }
 
-  const room: RoomState = { ydoc, clients: new Set<string>(), dirty: false };
+  const ownerId = (await getDocumentOwnerId(docId)) ?? "";
+
+  const room: RoomState = {
+    ydoc,
+    clients: new Set<string>(),
+    dirty: false,
+    ownerId,
+    lastEditorUserId: null,
+    lastVersionHash: null,
+    lastVersionAt: Date.now(),
+  };
   rooms.set(docId, room);
 
   // Subscribe this server instance to updates published by OTHER server
   // instances for this doc, so multi-instance deployments stay in sync.
-  // Origin-tagging prevents us re-applying our own writes.
+  // Origin-tagging prevents us re-applying our own writes. This also
+  // catches updates published by Next.js API routes (e.g. version restore)
+  // via publishRestoreUpdate, which uses a fixed senderServerId that never
+  // matches SERVER_ID, so those are always applied.
   subscribeToDocument(docId, (update: Uint8Array, originServerId: string) => {
     if (originServerId === SERVER_ID) return;
     Y.applyUpdate(room.ydoc, update);
+    room.dirty = true;
     io.to(docId).emit("yjs-update", update);
   });
 
@@ -99,6 +124,36 @@ async function flushRoom(docId: string, room: RoomState): Promise<void> {
     room.dirty = false;
   } catch (err) {
     console.error(`[persist] failed to flush doc ${docId}:`, err);
+  }
+}
+
+/**
+ * Auto-versioning: called every 2 minutes for every room. Skips rooms with
+ * no connected clients (not "actively edited"), and skips saving a new
+ * version if the content hash is identical to the last saved version
+ * (avoids no-op version spam when nothing actually changed).
+ */
+async function maybeSaveVersion(docId: string, room: RoomState): Promise<void> {
+  if (room.clients.size === 0) return;
+  if (Date.now() - room.lastVersionAt < VERSION_INTERVAL_MS) return;
+
+  const state = Y.encodeStateAsUpdate(room.ydoc);
+  const currentHash = hashBytes(state);
+
+  if (room.lastVersionHash === currentHash) {
+    room.lastVersionAt = Date.now();
+    return;
+  }
+
+  const createdById = room.lastEditorUserId ?? room.ownerId;
+  if (!createdById) return; // no known user to credit — skip rather than guess
+
+  try {
+    await saveVersionSnapshot(docId, state, createdById);
+    room.lastVersionHash = currentHash;
+    room.lastVersionAt = Date.now();
+  } catch (err) {
+    console.error(`[version] auto-save failed for doc ${docId}:`, err);
   }
 }
 
@@ -148,14 +203,15 @@ io.on("connection", (socket: Socket) => {
 
   socket.on(
     "yjs-update",
-    async (payload: { docId: string; update: Uint8Array }) => {
-      const { docId, update } = payload;
+    async (payload: { docId: string; update: Uint8Array; userId?: string }) => {
+      const { docId, update, userId } = payload;
       const room = rooms.get(docId);
       if (!room) return;
 
       try {
         Y.applyUpdate(room.ydoc, update);
         room.dirty = true;
+        if (userId) room.lastEditorUserId = userId;
 
         socket.to(docId).emit("yjs-update", update);
         await publishYjsUpdate(docId, update, SERVER_ID);
@@ -168,30 +224,30 @@ io.on("connection", (socket: Socket) => {
   socket.on(
     "cursor-update",
     async (payload: { docId: string; userId: string; cursor: CursorPosition }) => {
-        const { docId, userId, cursor } = payload;
-        const presenceRoom = presenceRooms.get(docId);
-        const existing = presenceRoom?.get(userId);
-        if (!presenceRoom || !existing) return;
+      const { docId, userId, cursor } = payload;
+      const presenceRoom = presenceRooms.get(docId);
+      const existing = presenceRoom?.get(userId);
+      if (!presenceRoom || !existing) return;
 
-        const updated: PresenceData = { ...existing, cursor, lastSeen: Date.now() };
-        presenceRoom.set(userId, updated);
+      const updated: PresenceData = { ...existing, cursor, lastSeen: Date.now() };
+      presenceRoom.set(userId, updated);
 
-        socket.to(docId).emit("cursor-moved", { userId, cursor });
+      socket.to(docId).emit("cursor-moved", { userId, cursor });
 
-        // Refresh Redis mirror + TTL, but don't block the broadcast on it.
-        void setPresence(docId, userId, updated);
-    }
-    );
+      // Refresh Redis mirror + TTL, but don't block the broadcast on it.
+      void setPresence(docId, userId, updated);
+    },
+  );
 
   socket.on("presence-heartbeat", async (payload: { docId: string; userId: string }) => {
-        const { docId, userId } = payload;
-        const presenceRoom = presenceRooms.get(docId);
-        const existing = presenceRoom?.get(userId);
-        if (!presenceRoom || !existing) return;
+    const { docId, userId } = payload;
+    const presenceRoom = presenceRooms.get(docId);
+    const existing = presenceRoom?.get(userId);
+    if (!presenceRoom || !existing) return;
 
-        const updated: PresenceData = { ...existing, lastSeen: Date.now() };
-        presenceRoom.set(userId, updated);
-        await setPresence(docId, userId, updated);
+    const updated: PresenceData = { ...existing, lastSeen: Date.now() };
+    presenceRoom.set(userId, updated);
+    await setPresence(docId, userId, updated);
   });
 
   socket.on("awareness-update", (payload: { docId: string; update: number[] }) => {
@@ -211,15 +267,15 @@ io.on("connection", (socket: Socket) => {
     socket.to(docId).emit("user-left", { userId });
 
     if (presenceRoom && presenceRoom.size === 0) {
-        presenceRooms.delete(docId);
+      presenceRooms.delete(docId);
     }
 
     if (!room) return;
     room.clients.delete(socket.id);
 
     if (room.clients.size === 0) {
-        await flushRoom(docId, room);
-        rooms.delete(docId);
+      await flushRoom(docId, room);
+      rooms.delete(docId);
     }
   }
 
@@ -234,6 +290,13 @@ const persistTimer = setInterval(() => {
   }
 }, PERSIST_INTERVAL_MS);
 
+// Auto-version every 2 minutes for actively-edited rooms.
+const versionTimer = setInterval(() => {
+  for (const [docId, room] of rooms.entries()) {
+    void maybeSaveVersion(docId, room);
+  }
+}, VERSION_INTERVAL_MS);
+
 httpServer.listen(PORT, () => {
   console.log(`[socket-server] listening on port ${PORT}`);
 });
@@ -241,6 +304,7 @@ httpServer.listen(PORT, () => {
 async function shutdown(): Promise<void> {
   console.log("[socket-server] SIGTERM received, flushing all rooms...");
   clearInterval(persistTimer);
+  clearInterval(versionTimer);
 
   await Promise.all(
     Array.from(rooms.entries()).map(([docId, room]) => flushRoom(docId, room)),
