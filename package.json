@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "dev:server": "node --env-file=.env.local node_modules/.bin/tsx watch server/index.ts"
+    "dev:server": "node --env-file=.env.local node_modules/.bin/tsx watch server/index.ts",
+    "test": "jest"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
@@ -42,6 +43,7 @@
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@testing-library/react": "^16.3.2",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.19.43",
     "@types/pg": "^8.20.0",
     "@types/react": "^18",
