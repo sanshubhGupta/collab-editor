@@ -68,7 +68,10 @@ export default function CollaborativeEditor({
 
   // Y.Doc must be stable across renders for a given documentId — recreated
   // only if documentId itself changes.
-  const ydoc = useMemo(() => new Y.Doc(), [documentId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- documentId isn't
+  // referenced in the memo body, but is intentionally a dependency: a new
+  // documentId should create a fresh Y.Doc, not reuse the previous one.
+  const ydoc = useMemo(() => new Y.Doc(), []);
 
   const { status: saveStatus, savedAt, errorMessage, saveNow } = useAutosave({
     documentId,

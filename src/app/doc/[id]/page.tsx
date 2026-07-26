@@ -1,19 +1,22 @@
 // src/app/doc/[id]/page.tsx
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import CollaborativeEditor from "@/components/CollaborativeEditor";
 import VersionHistory from "@/components/VersionHistory";
 
-// TEMPORARY TEST PAGE — hardcoded fake user, no real auth check yet.
-// Replace this with the real dashboard-linked version later.
+// TEMPORARY TEST PAGE — reads user identity from ?userId=&name= query
+// params (for Playwright / multi-window manual testing), falling back to
+// a default so it still works with a plain URL. Real auth wiring is a
+// later step — this is not how the production doc page will work.
 export default function DocPage() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const fakeUserId = "test-user-1";
-  const fakeUserName = "Test User One";
+  const fakeUserId = searchParams.get("userId") ?? "test-user-1";
+  const fakeUserName = searchParams.get("name") ?? "Test User One";
 
   return (
     <div className="max-w-4xl mx-auto p-6">
