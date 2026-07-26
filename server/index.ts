@@ -19,6 +19,13 @@ import {
   getDocumentOwnerId,
   saveVersionSnapshot,
 } from "./db-persist";
+import {
+  activeConnectionsGauge,
+  yjsMessagesCounter,
+  syncLatencyHistogram,
+  getMetricsText,
+  metricsContentType,
+} from "./metrics";
 
 interface PresenceData {
   userId: string;
@@ -65,6 +72,25 @@ const VERSION_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const rooms = new Map<string, RoomState>();
 
 const httpServer = createServer();
+
+// Handle GET /metrics directly on the raw HTTP server, alongside Socket.io.
+// Socket.io only intercepts requests matching its own path (/socket.io/ by
+// default) — any other request event listener, like this one, runs
+// independently for everything else.
+httpServer.on("request", async (req, res) => {
+  if (req.method === "GET" && req.url === "/metrics") {
+    try {
+      const metrics = await getMetricsText();
+      res.writeHead(200, { "Content-Type": metricsContentType });
+      res.end(metrics);
+    } catch (err) {
+      console.error("[metrics] failed to serve /metrics:", err);
+      res.writeHead(500);
+      res.end("Failed to collect metrics");
+    }
+  }
+});
+
 const io = new Server(httpServer, {
   cors: {
     origin: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
@@ -158,6 +184,7 @@ async function maybeSaveVersion(docId: string, room: RoomState): Promise<void> {
 }
 
 io.on("connection", (socket: Socket) => {
+  activeConnectionsGauge.inc();
   let currentDocId: string | null = null;
   let currentUserId: string | null = null;
 
@@ -204,6 +231,7 @@ io.on("connection", (socket: Socket) => {
   socket.on(
     "yjs-update",
     async (payload: { docId: string; update: Uint8Array; userId?: string }) => {
+      const receivedAt = Date.now();
       const { docId, update, userId } = payload;
       const room = rooms.get(docId);
       if (!room) return;
@@ -214,6 +242,13 @@ io.on("connection", (socket: Socket) => {
         if (userId) room.lastEditorUserId = userId;
 
         socket.to(docId).emit("yjs-update", update);
+
+        // Measured up to the broadcast call completing, as specified —
+        // deliberately NOT including publishYjsUpdate's Redis round-trip
+        // below, since that's cross-instance sync, not the local broadcast.
+        syncLatencyHistogram.observe(Date.now() - receivedAt);
+        yjsMessagesCounter.inc();
+
         await publishYjsUpdate(docId, update, SERVER_ID);
       } catch (err) {
         console.error(`[yjs-update] error for doc ${docId}:`, err);
@@ -280,7 +315,10 @@ io.on("connection", (socket: Socket) => {
   }
 
   socket.on("leave-document", handleLeave);
-  socket.on("disconnect", handleLeave);
+  socket.on("disconnect", () => {
+    activeConnectionsGauge.dec();
+    void handleLeave();
+  });
 });
 
 // Auto-persist every 5s for any dirty rooms.

@@ -1,0 +1,42 @@
+# docker-compose.monitoring.yml
+# Run alongside your main docker-compose.yml with:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up
+# or standalone:
+#   docker compose -f docker-compose.monitoring.yml up
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: collab_prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    extra_hosts:
+      # Lets the container resolve your WSL host machine, where
+      # server/index.ts (tsx, not Dockerized) is actually listening on 3001.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: collab_grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
